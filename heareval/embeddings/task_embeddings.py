@@ -32,7 +32,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import soundfile as sf
-import tensorflow as tf
 import torch
 from intervaltree import IntervalTree
 from torch.utils.data import DataLoader, Dataset
@@ -80,10 +79,6 @@ class Embedding:
             self.type = TORCH
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
             self.model.to(self.device)
-        elif isinstance(self.model, tf.Module):
-            self.type = TENSORFLOW
-            # Tensorflow automatically manages data transfers to device,
-            # so we don't need to set self.device
         else:
             raise TypeError(f"Unsupported model type received: {type(self.model)}")
 
@@ -111,13 +106,6 @@ class Embedding:
                     f"torch audio embedding models. "
                     f"Received: {type(x)}"
                 )
-
-        elif self.type == TENSORFLOW:
-            # Load array as tensor onto device
-
-            if not isinstance(x, np.ndarray):
-                x = x.numpy()
-            x = tf.convert_to_tensor(x)
         else:
             raise AssertionError("Unknown type")
 

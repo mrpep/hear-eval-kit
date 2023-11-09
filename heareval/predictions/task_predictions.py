@@ -1290,6 +1290,7 @@ def task_predictions(
     deterministic: bool,
     grid: str,
     logger: logging.Logger,
+    seed: Optional[int]=42
 ):
     # By setting workers=True in seed_everything(), Lightning derives
     # unique seeds across all dataloader workers and processes
@@ -1300,7 +1301,7 @@ def task_predictions(
     # results on 4 multi-worker jobs I ran, probably because our
     # dataloader doesn't do any augmentation or use randomness.
     if deterministic:
-        seed_everything(42, workers=False)
+        seed_everything(seed, workers=False)
 
     metadata = json.load(embedding_path.joinpath("task_metadata.json").open())
     label_vocab, nlabels = label_vocab_nlabels(embedding_path)

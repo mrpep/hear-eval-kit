@@ -19,6 +19,7 @@ from tqdm import tqdm
 import heareval.gpu_max_mem as gpu_max_mem
 from heareval.predictions.task_predictions import task_predictions
 
+import shutil
 
 # Cache this so the logger object isn't recreated,
 # and we get accurate "relativeCreated" times.
@@ -93,6 +94,12 @@ def get_logger(task_name: str, log_path: Path) -> logging.Logger:
     help="Shuffle tasks? (Default: False)",
     type=click.BOOL,
 )
+@click.option(
+    "--seed",
+    default=42,
+    help="Seed for the experiment (Default: 42)",
+    type=click.INT,
+)
 def runner(
     task_dirs: List[str],
     grid_points: int = 8,
@@ -101,6 +108,7 @@ def runner(
     deterministic: bool = True,
     grid: str = "default",
     shuffle: bool = False,
+    seed: int = 42
 ) -> None:
     if gpus is not None:
         gpus = json.loads(gpus)
@@ -109,10 +117,18 @@ def runner(
         random.shuffle(task_dirs)
     for task_dir in tqdm(task_dirs):
         task_path = Path(task_dir)
+        task_path_ = task_path
+        task_path = task_path_.joinpath('seed{}'.format(seed))
+        #Prepare seed path:
+        task_path.mkdir(parents=True, exist_ok=True)
+        files_to_cp = list(task_path_.glob('*.json')) + list(task_path_.glob('*.csv')) + list(task_path_.glob('*.pkl')) + list(task_path_.glob('*.npy'))
+        for f in files_to_cp:
+            shutil.copy(f, Path(task_path,f.name))
+
         if not task_path.is_dir():
             raise ValueError(f"{task_path} should be a directory")
 
-        done_file = task_path.joinpath("prediction-done.json")
+        done_file = task_path.joinpath("prediction-done-seed{}.json".format(seed))
         if done_file.exists():
             # We already did this
             continue
@@ -146,6 +162,7 @@ def runner(
             deterministic=deterministic,
             grid=grid,
             logger=logger,
+            seed=seed
         )
         sys.stdout.flush()
         gpu_max_mem_used = gpu_max_mem.measure()
@@ -167,7 +184,7 @@ def runner(
                     "grid_points": grid_points,
                     "gpus": gpus,
                     "gpu_max_mem": gpu_max_mem_used,
-                    "gpu_device_name": gpu_max_mem.device_name(),
+                    "gpu_device_name": gpu_max_mem.device_name().decode(),
                     "in_memory": in_memory,
                     "deterministic": deterministic,
                     # "grid": grid

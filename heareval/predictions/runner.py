@@ -184,7 +184,7 @@ def runner(
                     "grid_points": grid_points,
                     "gpus": gpus,
                     "gpu_max_mem": gpu_max_mem_used,
-                    "gpu_device_name": gpu_max_mem.device_name().decode(),
+                    "gpu_device_name": gpu_max_mem.device_name(),
                     "in_memory": in_memory,
                     "deterministic": deterministic,
                     # "grid": grid

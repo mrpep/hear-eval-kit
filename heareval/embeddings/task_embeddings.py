@@ -198,12 +198,24 @@ def get_dataloader_for_embedding(
 def save_scene_embedding_and_labels(
     embeddings: np.ndarray, labels: List[Dict], filenames: Tuple[str], outdir: Path
 ):
-    assert len(embeddings) == len(filenames)
+
+    assert embeddings.shape[-2] == len(filenames)
     assert len(labels) == len(filenames)
     for i, filename in enumerate(filenames):
-        out_file = outdir.joinpath(f"{filename}")
-        np.save(f"{out_file}.embedding.npy", embeddings[i])
-        json.dump(labels[i], open(f"{out_file}.target-labels.json", "w"))
+        if embeddings.ndim == 3:
+            for j,l in enumerate(embeddings):
+                outdir_parts = list(outdir.parts)
+                outdir_parts.insert(-2, 'layer_{}'.format(j))
+                outdir_layer = Path(*outdir_parts)
+                outdir_layer.mkdir(parents=True, exist_ok=True)
+
+                out_file = outdir_layer.joinpath(f"{filename}")
+                np.save(f"{out_file}.embedding.npy", l[i])
+                json.dump(labels[i], open(f"{out_file}.target-labels.json", "w"))                
+        else:
+            out_file = outdir.joinpath(f"{filename}")
+            np.save(f"{out_file}.embedding.npy", embeddings[i])
+            json.dump(labels[i], open(f"{out_file}.target-labels.json", "w"))
 
 
 def save_timestamp_embedding_and_labels(
@@ -449,5 +461,16 @@ def task_embeddings(
                 raise ValueError(
                     f"Unknown embedding type: {metadata['embedding_type']}"
                 )
+        if embeddings.ndim == 3:
+            for i in range(embeddings.shape[0]):
+                outdir_parts = list(outdir.parts)
+                outdir_parts.insert(-2, 'layer_{}'.format(i))
+                outdir_i = Path(*outdir_parts)
 
-        memmap_embeddings(outdir, prng, metadata, split, embed_task_dir, split_data)
+                embeddir_parts = list(embed_task_dir.parts)
+                embeddir_parts.insert(-1, 'layer_{}'.format(i))
+                embed_task_dir_i = Path(*embeddir_parts)
+
+                memmap_embeddings(outdir_i, prng, metadata, split, embed_task_dir_i, split_data)
+        else:
+            memmap_embeddings(outdir, prng, metadata, split, embed_task_dir, split_data)

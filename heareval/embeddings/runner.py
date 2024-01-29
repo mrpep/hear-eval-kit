@@ -42,6 +42,9 @@ from heareval.embeddings.task_embeddings import Embedding, task_embeddings
 @click.option(
     "--model-options", default="{}", help="A JSON dict of kwargs to pass to load_model"
 )
+@click.option(
+    "--device", default=None, help="Device to use for feature extraction"
+)
 def runner(
     module: str,
     model: str = None,
@@ -49,6 +52,7 @@ def runner(
     task: str = "tasks",
     embeddings_dir: str = "embeddings",
     model_options: str = "{}",
+    device: str = None
 ) -> None:
     model_options_dict = json.loads(model_options)
     if isinstance(model_options_dict, dict):
@@ -76,7 +80,7 @@ def runner(
         )
 
     # Load the embedding model
-    embedding = Embedding(module, model, model_options_dict)
+    embedding = Embedding(module, model, model_options_dict, device)
 
     if task == "all":
         tasks = list(tasks_dir_path.iterdir())

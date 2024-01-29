@@ -60,6 +60,7 @@ class Embedding:
         module_name: str,
         model_path: str = None,
         model_options: Optional[Dict[str, Any]] = None,
+        device: str = None
     ):
         print(f"Importing {module_name}")
         self.module = import_module(module_name)
@@ -77,7 +78,10 @@ class Embedding:
         # Check to see what type of model this is: torch or tensorflow
         if isinstance(self.model, torch.nn.Module):
             self.type = TORCH
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            if device is None:
+                self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            else:
+                self.device = device
             self.model.to(self.device)
         else:
             raise TypeError(f"Unsupported model type received: {type(self.model)}")

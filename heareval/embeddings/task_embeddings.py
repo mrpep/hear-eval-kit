@@ -69,6 +69,7 @@ class Embedding:
             model_options = {}
 
         # Load the model using the model weights path if they were provided
+        self.model_path = model_path
         if model_path is not None:
             print(f"Loading model using: {model_path}")
             self.model = self.module.load_model(model_path, **model_options)  # type: ignore
@@ -91,7 +92,7 @@ class Embedding:
         # TODO: would be nice to include version in this string, a versioned string.
         #   Potentially can set a version from the command line too to help with testing
         #   the same model but with difference versions of the weights.
-        return self.module.__name__
+        return self.module.__name__.split('.')[-1] + '-{}'.format(self.model_path)
 
     @property
     def sample_rate(self):

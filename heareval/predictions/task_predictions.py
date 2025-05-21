@@ -38,6 +38,7 @@ from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger
 from scipy.ndimage import median_filter
 from sklearn.model_selection import ParameterGrid
+from sklearn.decomposition import PCA
 from torch.utils.data import ConcatDataset, DataLoader, Dataset
 from tqdm.auto import tqdm
 
@@ -184,6 +185,7 @@ class FullyConnectedPrediction(torch.nn.Module):
             raise ValueError(f"Unknown prediction_type {prediction_type}")
 
     def forward_logit(self, x: torch.Tensor) -> torch.Tensor:
+
         x = self.hidden(x)
         x = self.projection(x)
         return x
@@ -200,6 +202,7 @@ class AbstractPredictionModel(pl.LightningModule):
         nfeatures: int,
         label_to_idx: Dict[str, int],
         nlabels: int,
+        nlayers: int, 
         prediction_type: str,
         scores: List[ScoreFunction],
         conf: Dict,
@@ -223,7 +226,11 @@ class AbstractPredictionModel(pl.LightningModule):
         self.scores = scores
         self.validation_outs = []
         self.test_outs = []
-
+        self.nlayers = nlayers
+        if self.nlayers > 1:
+            self.lw = torch.nn.Parameter(torch.ones(self.nlayers), requires_grad=True)
+        else:
+            self.lw = None
     def forward(self, x):
         # x = self.layernorm(x)
         x = self.predictor(x)
@@ -232,7 +239,12 @@ class AbstractPredictionModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         # training_step defined the train loop.
         # It is independent of forward
+        
         x, y, _ = batch
+        if self.lw is not None:
+            lw = torch.abs(self.lw)
+            lw = lw/torch.sum(lw)
+            x = torch.sum(x * lw[None,:,None], dim=1)
         y_hat = self.predictor.forward_logit(x)
         loss = self.predictor.logit_loss(y_hat, y)
         # Logging to TensorBoard by default
@@ -242,6 +254,10 @@ class AbstractPredictionModel(pl.LightningModule):
     def _step(self, batch, batch_idx):
         # -> Dict[str, Union[torch.Tensor, List(str)]]:
         x, y, metadata = batch
+        if self.lw is not None:
+            lw = torch.abs(self.lw)
+            lw = lw/torch.sum(lw)
+            x = torch.sum(x * lw[None,:,None], dim=1)
         y_hat = self.predictor.forward_logit(x)
         y_pr = self.predictor(x)
         z = {
@@ -347,6 +363,7 @@ class ScenePredictionModel(AbstractPredictionModel):
         nfeatures: int,
         label_to_idx: Dict[str, int],
         nlabels: int,
+        nlayers: int,
         prediction_type: str,
         scores: List[ScoreFunction],
         conf: Dict,
@@ -356,6 +373,7 @@ class ScenePredictionModel(AbstractPredictionModel):
             nfeatures=nfeatures,
             label_to_idx=label_to_idx,
             nlabels=nlabels,
+            nlayers=nlayers,
             prediction_type=prediction_type,
             scores=scores,
             conf=conf,
@@ -556,6 +574,9 @@ class SplitMemmapDataset(Dataset):
         embedding_type: str,
         in_memory: bool,
         metadata: bool,
+        dim_list: Optional[str],
+        train_prop: float = 1.0,
+        subsample_type: str = 'balanced'
     ):
         self.embedding_path = embedding_path
         self.label_to_idx = label_to_idx
@@ -581,6 +602,8 @@ class SplitMemmapDataset(Dataset):
             nandim = self.embeddings.isnan().sum().tolist()
             infdim = self.embeddings.isinf().sum().tolist()
             assert nandim == 0 and infdim == 0
+        self.pca_model = None
+        self.pca_applied = False
         self.labels = pickle.load(
             open(embedding_path.joinpath(f"{split_name}.target-labels.pkl"), "rb")
         )
@@ -614,12 +637,48 @@ class SplitMemmapDataset(Dataset):
             ys.append(y)
         self.y = torch.stack(ys)
         assert self.y.shape == (len(self.labels), self.nlabels)
+        if dim_list is not None:
+            dim_file, dim_line = dim_list.split(':')
+            with open(dim_file, 'r') as f:
+                lines = f.read().splitlines()
+            dim_map = {k.split(':')[0]: [int(ki) for ki in k.split(":")[1].split(',')] for k in lines}
+            self.dim_list = np.array(dim_map[dim_line])
+        else:
+            self.dim_list = None
+        self.train_prop = train_prop
+        self.subsample_type = subsample_type
+        if self.subsample_type == 'stratified':
+            per_class_samples = {}
+            for idx, class_idx in enumerate(torch.argmax(self.y, dim=1)):
+                if class_idx.item() in per_class_samples:
+                    per_class_samples[class_idx.item()].append([self.embeddings[idx], self.y[idx]])
+                else:
+                    per_class_samples[class_idx.item()] = [[self.embeddings[idx], self.y[idx]]]
+            subsampled_embeddings = []
+            subsampled_y = []
+            for k, v in per_class_samples.items():
+                nclass = int(len(v)*self.train_prop)
+                subsampled_embeddings.extend([vi[0] for vi in v[:nclass]])
+                subsampled_y.extend([vi[1] for vi in v[:nclass]])
+            self.embeddings = torch.stack(subsampled_embeddings)
+            self.y = torch.stack(subsampled_y)
 
     def __len__(self) -> int:
-        return self.dim[0]
+        if self.subsample_type == 'stratified':
+            return len(self.y)
+        else:
+            return int(self.dim[0]*self.train_prop)
 
     def __getitem__(self, idx) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
-        return self.embeddings[idx], self.y[idx], self.metadata[idx]
+        emb = self.embeddings[idx]
+
+        if (self.pca_model and (not self.pca_applied)):
+            emb = self.pca_model.transform(emb.reshape(1,-1))[0].astype(np.float32)
+            
+        if self.dim_list is not None:
+            emb = emb[self.dim_list]
+
+        return emb, self.y[idx], self.metadata[idx]
 
 
 def create_events_from_prediction(
@@ -792,7 +851,11 @@ def dataloader_from_split_name(
     metadata: bool = True,
     batch_size: int = 64,
     pin_memory: bool = True,
-) -> DataLoader:
+    pca_model: Optional[Any] = None,
+    dim_list: Optional[str] = None,
+    train_prop: float = 1.0,
+    subsample_type: str = 'balanced'
+) -> tuple[DataLoader, PCA]:
     """
     Get the dataloader for a `split_name` or a list of `split_name`
 
@@ -809,6 +872,10 @@ def dataloader_from_split_name(
         with [fold00, fold01, fold02, fold03] will create the
         required dataloader
     """
+    #if pca_model == 'train':
+    #    pca_model_ = None
+    #else:
+    #    pca_model_ = pca_model
     if isinstance(split_name, (list, set)):
         dataset = ConcatDataset(
             [
@@ -820,6 +887,9 @@ def dataloader_from_split_name(
                     embedding_type=embedding_type,
                     in_memory=in_memory,
                     metadata=metadata,
+                    dim_list=dim_list,
+                    train_prop=train_prop,
+                    subsample_type=subsample_type
                 )
                 for name in split_name
             ]
@@ -833,10 +903,44 @@ def dataloader_from_split_name(
             embedding_type=embedding_type,
             in_memory=in_memory,
             metadata=metadata,
+            dim_list=dim_list,
+            train_prop=train_prop,
+            subsample_type=subsample_type
         )
     else:
         raise ValueError("split_name should be a list or string")
 
+    if not pca_model.trained:
+        #pca_model = PCA()
+        #Don't discard features for PCA:
+        if type(dataset).__name__ == 'ConcatDataset':
+            original_dim = copy.copy(dataset.datasets[0].dim_list)
+            for d in dataset.datasets:
+                d.dim_list = None
+        else:
+            original_dim = copy.copy(dataset.dim_list)
+            dataset.dim_list = None
+        train_dataset = np.stack([x[0] for x in dataset])
+        print(f"{split_name}-trained-false")
+        pca_model.fit(train_dataset)
+        #Restore dim filter:
+        if type(dataset).__name__ == 'ConcatDataset':
+            for d in dataset.datasets:
+                d.dim_list = original_dim
+        else:
+            dataset.dim_list = original_dim
+
+    if type(dataset).__name__ == 'ConcatDataset':
+        for d in dataset.datasets:
+            d.pca_model = pca_model
+            if pca_model and in_memory:
+                d.embeddings = pca_model.transform(d.embeddings).astype(np.float32)
+                d.pca_applied = True
+    else:
+        dataset.pca_model = pca_model
+        #if pca_model and in_memory:
+        #    dataset.embeddings = pca_model.transform(dataset.embeddings).astype(np.float32)
+        #    dataset.pca_applied = True
     print(
         f"Getting embeddings for split {split_name}, "
         + f"which has {len(dataset)} instances."
@@ -865,7 +969,7 @@ def dataloader_from_split_name(
         shuffle=shuffle,
         pin_memory=pin_memory,
         num_workers=num_workers,
-    )
+    ), pca_model
 
 
 class GridPointResult:
@@ -881,6 +985,8 @@ class GridPointResult:
         validation_score: float,
         score_mode: str,
         conf: Dict,
+        pca_model: Any,
+        lw: Any
     ):
         self.predictor = predictor
         self.model_path = model_path
@@ -892,6 +998,8 @@ class GridPointResult:
         self.validation_score = validation_score
         self.score_mode = score_mode
         self.conf = conf
+        self.pca_model = pca_model
+        self.lw = lw
 
     def __repr__(self):
         return json.dumps(
@@ -900,6 +1008,7 @@ class GridPointResult:
                 self.epoch,
                 hparams_to_json(self.hparams),
                 self.postprocessing,
+                self.lw
             )
         )
 
@@ -917,6 +1026,11 @@ def task_predictions_train(
     gpus: Any,
     in_memory: bool,
     deterministic: bool,
+    apply_pca: bool,
+    dim_list: Optional[str] = None,
+    pca_model: Optional[Any] = None,
+    train_prop: float = 1.0,
+    subsample_type: str = 'balanced'
 ) -> GridPointResult:
     """
     Train a predictor for a specific task using pre-computed embeddings.
@@ -924,6 +1038,13 @@ def task_predictions_train(
 
     start = time.time()
     predictor: AbstractPredictionModel
+    emb_dim = json.load(open(next(iter(embedding_path.rglob('*.embedding-dimensions.json')))))
+    if len(emb_dim) == 3:
+        nlayers = emb_dim[1]
+    elif (pca_model is not None) and (pca_model.layer_dims):
+        nlayers = len(pca_model.layer_dims)
+    else:
+        nlayers = 1
     if metadata["embedding_type"] == "event":
 
         def _combine_target_events(split_names: List[str]):
@@ -985,6 +1106,7 @@ def task_predictions_train(
             nfeatures=embedding_size,
             label_to_idx=label_to_idx,
             nlabels=nlabels,
+            nlayers=nlayers,
             prediction_type=metadata["prediction_type"],
             scores=scores,
             conf=conf,
@@ -1032,7 +1154,12 @@ def task_predictions_train(
         profiler="simple",
         logger=logger,
     )
-    train_dataloader = dataloader_from_split_name(
+    if apply_pca:
+        if pca_model is None:
+            pca_model = 'train'
+    else:
+        pca_model = None
+    train_dataloader,pca_model = dataloader_from_split_name(
         data_splits["train"],
         embedding_path,
         label_to_idx,
@@ -1041,8 +1168,12 @@ def task_predictions_train(
         batch_size=conf["batch_size"],
         in_memory=in_memory,
         metadata=False,
+        dim_list=dim_list,
+        pca_model=pca_model,
+        train_prop=train_prop,
+        subsample_type=subsample_type
     )
-    valid_dataloader = dataloader_from_split_name(
+    valid_dataloader,_ = dataloader_from_split_name(
         data_splits["valid"],
         embedding_path,
         label_to_idx,
@@ -1050,7 +1181,22 @@ def task_predictions_train(
         metadata["embedding_type"],
         batch_size=conf["batch_size"],
         in_memory=in_memory,
+        dim_list=dim_list,
+        pca_model=pca_model
     )
+    if pca_model:
+        embedding_size = pca_model.components
+    if metadata['embedding_type'] == 'scene':
+        predictor = ScenePredictionModel(
+            nfeatures=embedding_size,
+            label_to_idx=label_to_idx,
+            nlabels=nlabels,
+            nlayers=nlayers,
+            prediction_type=metadata["prediction_type"],
+            scores=scores,
+            conf=conf,
+            use_scoring_for_early_stopping=use_scoring_for_early_stopping,
+        )
     trainer.fit(predictor, train_dataloader, valid_dataloader)
     if checkpoint_callback.best_model_score is not None:
         sys.stdout.flush()
@@ -1065,6 +1211,10 @@ def task_predictions_train(
         logger.log_metrics({"time_in_min": time_in_min})
         logger.finalize("success")
         logger.save()
+        if 'lw' in predictor.state_dict():
+            lw = predictor.state_dict()['lw'].detach().cpu().numpy().tolist()
+        else:
+            lw = None
         return GridPointResult(
             predictor=predictor,
             model_path=checkpoint_callback.best_model_path,
@@ -1076,6 +1226,8 @@ def task_predictions_train(
             validation_score=checkpoint_callback.best_model_score.detach().cpu().item(),
             score_mode=mode,
             conf=conf,
+            pca_model=pca_model,
+            lw=lw
         )
     else:
         raise ValueError(
@@ -1091,11 +1243,12 @@ def task_predictions_test(
     label_to_idx: Dict[str, int],
     nlabels: int,
     in_memory: bool,
+    dim_list: Optional[str]
 ):
     """
     Test a pre-trained predictor using precomputed embeddings.
     """
-    test_dataloader = dataloader_from_split_name(
+    test_dataloader, pca_model = dataloader_from_split_name(
         data_splits["test"],
         embedding_path,
         label_to_idx,
@@ -1103,6 +1256,8 @@ def task_predictions_test(
         metadata["embedding_type"],
         batch_size=grid_point.conf["batch_size"],
         in_memory=in_memory,
+        dim_list=dim_list,
+        pca_model=grid_point.pca_model
     )
 
     trainer = grid_point.trainer
@@ -1116,6 +1271,13 @@ def task_predictions_test(
     )
     assert len(test_results) == 1, "Should have only one test dataloader"
     test_results = test_results[0]
+    
+    if 'lw' in trainer.model.state_dict():
+        test_results['lw'] = trainer.model.state_dict()['lw'].detach().cpu().numpy().tolist()
+    else:
+        lw = None
+
+    
     return test_results
 
 
@@ -1175,8 +1337,9 @@ def aggregate_test_results(results: Dict[str, Dict[str, float]]) -> Dict[str, fl
     results_df = pd.DataFrame.from_dict(results, orient="index")
     aggregate_results = {}
     for score in results_df:
-        aggregate_results[f"{score}_mean"] = results_df[score].mean()
-        aggregate_results[f"{score}_std"] = results_df[score].std()
+        if score != 'lw':
+            aggregate_results[f"{score}_mean"] = results_df[score].mean()
+            aggregate_results[f"{score}_std"] = results_df[score].std()
 
     return aggregate_results
 
@@ -1290,7 +1453,12 @@ def task_predictions(
     deterministic: bool,
     grid: str,
     logger: logging.Logger,
-    seed: Optional[int]=42
+    seed: Optional[int]=42,
+    apply_pca: Optional[bool]=False,
+    dim_list: Optional[str]=None,
+    pca_model: Optional[Any]=None,
+    train_prop: float = 1.0,
+    subsample_type: str = 'balanced'
 ):
     # By setting workers=True in seed_everything(), Lightning derives
     # unique seeds across all dataloader workers and processes
@@ -1366,6 +1534,11 @@ def task_predictions(
             gpus=gpus,
             in_memory=in_memory,
             deterministic=deterministic,
+            apply_pca=apply_pca,
+            dim_list=dim_list,
+            pca_model=pca_model,
+            train_prop=train_prop,
+            subsample_type=subsample_type
         )
         logger.info(f" result: {grid_point_result}")
         grid_point_results.append(grid_point_result)
@@ -1400,6 +1573,10 @@ def task_predictions(
             gpus=gpus,
             in_memory=in_memory,
             deterministic=deterministic,
+            apply_pca=apply_pca,
+            dim_list=dim_list,
+            pca_model=pca_model,
+            train_prop=train_prop
         )
         split_grid_points.append(grid_point_result)
         logger.info(
@@ -1419,6 +1596,7 @@ def task_predictions(
             label_to_idx=label_to_idx,
             nlabels=nlabels,
             in_memory=in_memory,
+            dim_list=dim_list,
         )
 
         # Cache predictions for detailed analysis
@@ -1451,6 +1629,8 @@ def task_predictions(
             "embedding_path": str(embedding_path),
         }
     )
+    if best_grid_point.pca_model and best_grid_point.pca_model.dynamic:
+        test_results.update({'pca_components': int(best_grid_point.pca_model.components)})
 
     # Save test scores
     open(embedding_path.joinpath("test.predicted-scores.json"), "wt").write(

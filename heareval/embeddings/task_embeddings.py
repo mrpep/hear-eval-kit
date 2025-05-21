@@ -203,24 +203,26 @@ def get_dataloader_for_embedding(
 def save_scene_embedding_and_labels(
     embeddings: np.ndarray, labels: List[Dict], filenames: Tuple[str], outdir: Path
 ):
-
     assert embeddings.shape[-2] == len(filenames)
     assert len(labels) == len(filenames)
     for i, filename in enumerate(filenames):
-        if embeddings.ndim == 3:
-            for j,l in enumerate(embeddings):
-                outdir_parts = list(outdir.parts)
-                outdir_parts.insert(-2, 'layer_{}'.format(j))
-                outdir_layer = Path(*outdir_parts)
-                outdir_layer.mkdir(parents=True, exist_ok=True)
+        #if embeddings.ndim == 3:
+        #    for j,l in enumerate(embeddings):
+        #        outdir_parts = list(outdir.parts)
+        #        outdir_parts.insert(-2, 'layer_{}'.format(j))
+        #        outdir_layer = Path(*outdir_parts)
+        #        outdir_layer.mkdir(parents=True, exist_ok=True)
 
-                out_file = outdir_layer.joinpath(f"{filename}")
-                np.save(f"{out_file}.embedding.npy", l[i])
-                json.dump(labels[i], open(f"{out_file}.target-labels.json", "w"))                
-        else:
-            out_file = outdir.joinpath(f"{filename}")
+        #        out_file = outdir_layer.joinpath(f"{filename}")
+        #        np.save(f"{out_file}.embedding.npy", l[i])
+        #        json.dump(labels[i], open(f"{out_file}.target-labels.json", "w"))                
+        #else:
+        out_file = outdir.joinpath(f"{filename}")
+        if embeddings.ndim == 2:
             np.save(f"{out_file}.embedding.npy", embeddings[i])
-            json.dump(labels[i], open(f"{out_file}.target-labels.json", "w"))
+        elif embeddings.ndim == 3:
+            np.save(f"{out_file}.embedding.npy", embeddings[:,i])
+        json.dump(labels[i], open(f"{out_file}.target-labels.json", "w"))
 
 
 def save_timestamp_embedding_and_labels(
@@ -288,13 +290,16 @@ def memmap_embeddings(
     # First count the number of embeddings total
     nembeddings = 0
     ndim: int
+    nlayer: int = 1
     for embedding_file in tqdm(embedding_files):
         assert embedding_file.exists()
         emb = np.load(embedding_file).astype(np.float32)
         if metadata["embedding_type"] == "scene":
-            assert emb.ndim == 1
+            #assert emb.ndim == 1
             nembeddings += 1
-            ndim = emb.shape[0]
+            ndim = emb.shape[-1]
+            if emb.ndim == 2:
+                nlayer = emb.shape[0]
             assert emb.dtype == np.float32
         elif metadata["embedding_type"] == "event":
             assert emb.ndim == 2
@@ -304,14 +309,19 @@ def memmap_embeddings(
         else:
             raise ValueError(f"Unknown embedding type: {metadata['embedding_type']}")
 
-    open(
-        embed_task_dir.joinpath(f"{split_name}.embedding-dimensions.json"), "wt"
-    ).write(json.dumps((nembeddings, ndim)))
+    if nlayer == 1:
+        open(
+            embed_task_dir.joinpath(f"{split_name}.embedding-dimensions.json"), "wt"
+        ).write(json.dumps((nembeddings, ndim)))
+    else:
+        open(
+            embed_task_dir.joinpath(f"{split_name}.embedding-dimensions.json"), "wt"
+        ).write(json.dumps((nembeddings, nlayer, ndim)))        
     embedding_memmap = np.memmap(
         filename=embed_task_dir.joinpath(f"{split_name}.embeddings.npy"),
         dtype=np.float32,
         mode="w+",
-        shape=(nembeddings, ndim),
+        shape=(nembeddings, ndim) if nlayer == 1 else (nembeddings, nlayer, ndim),
     )
     idx = 0
     labels = []
@@ -323,7 +333,7 @@ def memmap_embeddings(
         )
 
         if metadata["embedding_type"] == "scene":
-            assert emb.ndim == 1
+            #assert emb.ndim == 1
             embedding_memmap[idx] = emb
             # lbl will be a list of labels, make sure that it has exactly one label
             # for multiclass problems. Will be a list of zero or more for multilabel.
@@ -466,16 +476,16 @@ def task_embeddings(
                 raise ValueError(
                     f"Unknown embedding type: {metadata['embedding_type']}"
                 )
-        if embeddings.ndim == 3:
-            for i in range(embeddings.shape[0]):
-                outdir_parts = list(outdir.parts)
-                outdir_parts.insert(-2, 'layer_{}'.format(i))
-                outdir_i = Path(*outdir_parts)
+        #if embeddings.ndim == 3:
+        #    for i in range(embeddings.shape[0]):
+        #        outdir_parts = list(outdir.parts)
+        #        outdir_parts.insert(-2, 'layer_{}'.format(i))
+        #        outdir_i = Path(*outdir_parts)
 
-                embeddir_parts = list(embed_task_dir.parts)
-                embeddir_parts.insert(-1, 'layer_{}'.format(i))
-                embed_task_dir_i = Path(*embeddir_parts)
+        #        embeddir_parts = list(embed_task_dir.parts)
+        #        embeddir_parts.insert(-1, 'layer_{}'.format(i))
+        #        embed_task_dir_i = Path(*embeddir_parts)
 
-                memmap_embeddings(outdir_i, prng, metadata, split, embed_task_dir_i, split_data)
+        #        memmap_embeddings(outdir_i, prng, metadata, split, embed_task_dir_i, split_data)
         else:
             memmap_embeddings(outdir, prng, metadata, split, embed_task_dir, split_data)

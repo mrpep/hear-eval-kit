@@ -240,6 +240,8 @@ def runner(
     subsample_type: str = 'balanced'
     
 ) -> None:
+    if layer_dims == '':
+        layer_dims = None
     if gpus is not None:
         gpus = json.loads(gpus)
 
@@ -309,10 +311,13 @@ def runner(
         start = time.time()
         gpu_max_mem.reset()
 
-        if pca_file is not None:
-            pca_model = joblib.load(pca_file)
+        if apply_pca != 'false':
+            if pca_file is not None:
+                pca_model = joblib.load(pca_file)
+            else:
+                pca_model = PCAModel(layer_dims=layer_dims, num_components=pca_dim)
         else:
-            pca_model = PCAModel(layer_dims=layer_dims, num_components=pca_dim)
+            pca_model = None
         task_predictions(
             embedding_path=task_path,
             embedding_size=embedding_size,

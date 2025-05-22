@@ -910,7 +910,7 @@ def dataloader_from_split_name(
     else:
         raise ValueError("split_name should be a list or string")
 
-    if not pca_model.trained:
+    if (pca_model is not None) and (not pca_model.trained):
         #pca_model = PCA()
         #Don't discard features for PCA:
         if type(dataset).__name__ == 'ConcatDataset':
@@ -1154,7 +1154,7 @@ def task_predictions_train(
         profiler="simple",
         logger=logger,
     )
-    if apply_pca:
+    if apply_pca != 'false':
         if pca_model is None:
             pca_model = 'train'
     else:
